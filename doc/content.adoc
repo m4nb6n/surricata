@@ -1,0 +1,1237 @@
+= suricatta documentation
+Andrey Antukh, <niwi@niwi.nz>
+1.3.1
+:toc: left
+:!numbered:
+:source-highlighter: pygments
+:pygments-style: friendly
+:sectlinks:
+
+
+== Introduction
+
+_suricatta_ is a high level sql toolkit for clojure (backed by fantastic
+link:http://www.jooq.org/[jooq library])
+
+It consists in four modules:
+
+- *suricatta.core*: api for executing queries.
+- *suricatta.dsl*: lightweight dsl for idiomatic and composable sql building.
+- *suricatta.format*: sql rendering functions.
+
+
+=== Project Maturity
+
+Since _suricatta_ is a young project there may be some API breakage.
+
+
+=== Install
+
+The simplest way to use _suricatta_ in a clojure project, is by including it in the
+dependency vector on your *_project.clj_* file:
+
+[source,clojure]
+----
+[funcool/suricatta "1.3.1"]
+----
+
+_Suricatta_ is only runs with *JDK >= 8* and *Clojure >= 1.5*
+
+
+== SQL Execution
+
+This section explains the usage of the sql execution part of the library.
+
+
+=== Connecting to database
+
+_suricatta_, unlike other database libraries, uses a concept of *context* instead
+of *connection*. A **context** has the resposibility of jdbc connection resource
+management, transaction isolation flags and sql rendering dialect.
+
+You can create a **context** from:
+
+- a hash-map dbspec format (plain connection params).
+- a datasource instance (connection pool).
+- a link:http://funcool.github.io/clojure.jdbc/latest/[clojure.jdbc] connection
+  instance.
+
+.This is a default aspect of one dbspec.
+[source,clojure]
+----
+(def dbspec {:subprotocol "postgresql"
+             :subname "//localhost:5432/dbname"
+             :user "username"         ;; Optional
+             :password "password"}    ;; Optional
+----
+
+==== Create Context from plain dbspec.
+
+.Example creating context from dbspec.
+[source, clojure]
+----
+(require '[suricatta.core :as sc])
+(with-open [ctx (sc/context {:subprotocol "h2"
+                             :subname "mem:"})]
+  (do-something-with ctx))
+----
+
+==== Create Context from _clojure.jdbc_ connection.
+
+.Example creating context from _clojure.jdbc_ connection instance.
+[source, clojure]
+----
+(require '[jdbc.core :as jdbc])
+(require '[suricatta.core :as sc])
+
+(def dbspec {:subprotocol "h2"
+             :subname "mem:"})
+
+(with-open [conn (jdbc/connection dbspec)
+            ctx (sc/context conn)]
+  (do-something ctx))
+----
+
+NOTE: when closing the _suricatta_ context, the wrapped connection will also be closed.
+
+
+==== Create Context from DataSource.
+
+DataSource is the preferd way to connect to the database in production enviroments
+and is usually used to implement connection pools.
+
+In our case we will use *hikaricp* as a datasource with a connection pool. Lets
+start by adding hikari's dependency entry to your _project.clj_:
+
+[source, clojure]
+----
+[hikari-cp "0.13.0" :exclusions [com.zaxxer/HikariCP]]
+[com.zaxxer/HikariCP-java6 "2.2.5"]
+----
+
+Now create the datasource instance:
+
+[source, clojure]
+----
+(require '[hikari-cp.core :as hikari])
+
+(def ^javax.sql.Datasource
+  datasource (hikari/make-datasource
+              {:connection-timeout 30000
+               :idle-timeout 600000
+               :max-lifetime 1800000
+               :minimum-idle 10
+               :maximum-pool-size  10
+               :adapter "postgresql"
+               :username "username"
+               :password "password"
+               :database-name "database"
+               :server-name "localhost"
+               :port-number 5432}))
+----
+
+Now, having a datasource instace, you can use it like plain dbspec for creating
+a context instance:
+
+[source, clojure]
+----
+(with-open [ctx (sc/context datasource)]
+  (do-something-with ctx))
+----
+
+You can found more information and documentation about hikari-cp
+here: https://github.com/tomekw/hikari-cp
+
+
+=== Executing queries
+
+_suricatta_ has a clear separation between queries that can return a result, and
+queries that can't.
+
+.Example using `suricatta.core/execute` function.
+[source, clojure]
+----
+(require '[suricatta.core :as sc])
+(sc/execute ctx "CREATE TABLE foo")
+----
+
+The return value of `suricatta.core/execute` function depends on the query, but
+in almost all cases it returns a number of affected rows.
+
+
+=== Fetching results
+
+Let see an example of how to execute a query and fetch results:
+
+[source, clojure]
+----
+(require '[suricatta.core :as sc])
+(sc/fetch ctx "select x from generate_series(1,3) as x")
+;; => [{:x 1} {:x 2} {:x 3}]
+
+(sc/fetch-one ctx "select x from generate_series(1,1) as x")
+;; => {:x 1}
+----
+
+[NOTE]
+====
+_suricatta_ gives you the power of raw sql queries without
+any restrictions (unlike jdbc). As a great example, _suricatta_ does
+not have special syntax for queries with `RETURNING` clause:
+
+[source, clojure]
+----
+(sc/fetch ctx "INSERT INTO foo (name) values ('bar') returning id")
+;; => [{:id 27}]
+----
+====
+
+
+=== Parametrized queries
+
+Like _clojure.jdbc_ and _clojure.java.jdbc_, _suricatta_ has support for
+parametrized queries in *sqlvec* format.
+
+[source, clojure]
+----
+(sc/fetch ctx ["select id from books where age > ? limit 1" 100])
+;; => [{:id 4232}]
+----
+
+
+=== Reusing query statement
+
+The above technique can be quite useful when you want to reuse expensive database
+resources.
+
+[source, clojure]
+----
+(with-open [q (sc/query ctx ["select ?" 1])]
+  (sc/fetch q)  ;; Creates a statement
+  (sc/fetch q)) ;; Reuses the previous created statement
+----
+
+
+=== Transactions
+
+The _suricatta_ library does not have support for low level transactions api,
+instead of it, offers a lightweight abstraction over complex transaction api.
+
+.Execute a query in a transaction block.
+[source, clojure]
+----
+(sc/atomic-apply ctx (fn [ctx]
+                       (sc/fetch ctx "select id, name from book for update")))
+----
+
+Additionally to `atomic-apply` high order functiom, _suricatta_ has a convenient
+macro offering lightweight sugar sytax for atomic blocks:
+
+.Execute a query in a transaction block using sugar syntax macro.
+[source, clojure]
+----
+(sc/atomic ctx
+  (sc/fetch ctx "select id, name from book for update"))
+----
+
+You can nest atomic usage as deep as you want, subtransactions are fully supported.
+
+If an exception is raised inside atomic context the transaction will be aborted.
+Also, in some circumstances, you probably want an explicit rollback, for which
+the _suricatta_ library exposes a `suricatta.core/set-rollback!` function.
+
+.Explicit rollback example
+[source, clojure]
+----
+(sc/atomic ctx
+  (sc/execute ctx "update table1 set f1 = 1")
+  (sc/set-rollback! ctx))
+----
+
+The `set-rollback!` function only marks the current transaction for rollback. It
+does not abort the execution, and it is aware of subtransactions. If it is used
+in a subtransaction, only the subtransaction will be marked for rollback, not
+the entire transaction.
+
+
+=== Lazy result fetching
+
+The _suricatta_ library also comes with lazy fetching support. When lazy fetching
+support is enabled, instead of fetching all results in memory, suricatta will
+fetch results in small groups, allowing lower memory usage.
+
+Lazy fetching has a few quirks:
+
+- In some databases, like _PostgreSQL_, it requires the entire fetch to occur in
+  one transaction because it uses  server side cursors.
+- Lazy fetching requires explicit resource management, because a connection and
+  an internal resultset must be mantained open until fetching is finished.
+
+Using lazy fetch is realy easy, because suricatta exposes it as a simple lazy
+sequence. Let's see one example:
+
+.Example executing large query and fetching elemens in groups of 10.
+[source, clojure]
+----
+(def sql "SELECT x FROM generate_series(1, 10000)")
+
+(sc/atomic ctx
+  (with-open [cursor (sc/fetch-lazy ctx sql {:fetch-size 10})]
+    (doseq [item (sc/cursor->lazyseq cursor)]
+      (println item))))
+
+;; This should print something similar to:
+;; {:x 1}
+;; {:x 2}
+;; ...
+----
+
+The third parameter of `sc/fetch-lazy` function is the optional default fetch
+size (currently 100.)
+
+
+=== Custom types
+
+Since 0.2.0 version, suricatta comes with support for extension with custom
+(or vendor specific) types support. It consist in two protocols, one for converting
+user defined types to jooq/jdbc compatible types, and other for backwards conversion.
+
+.Example adapting clojure persistent map interface to postgresql json file.
+[source, clojure]
+----
+(require '[suricatta.proto :as proto]
+         '[cheshire.core :as json])
+
+(import 'org.postgresql.util.PGobject)
+
+(extend-protocol proto/IParamType
+  clojure.lang.IPersistentMap
+  (-render [self ctx]
+    (if (proto/-inline? ctx)
+      (str "'" (json/encode self) "'::json")
+      "?::json"))
+
+  (-bind [self ctx]
+    (when-not (proto/-inline? ctx)
+      (let [stmt (proto/-statement ctx)
+            idx  (proto/-next-bind-index ctx)
+            obj (doto (PGobject.)
+                  (.setType "json")
+                  (.setValue (json/encode (.-data self))))]
+        (.setObject stmt idx obj)))))
+----
+
+The `-render` function is responsible of generate the appropiate sql for this field.
+The value should be inlined or rendered as bind ready parameter depending on the
+`inline` value that can be retrieved from the `RenderContext`.
+
+The `-bind` function reponsibility is just bind the appropiate values to the
+prepared statement only if the context indicates that is not inlined.
+
+Now let see the backward conversion example:
+
+[source, clojure]
+----
+(extend-protocol proto/ISQLType
+  PGobject
+  (-convert [self]
+    (let [type (.getType self)]
+      (condp = type
+        "json" (json/decode (.getValue self) true)))))
+----
+
+Having defined the two way conversions, you can pass the clojure hash-map as a
+value to the query and it is automatically converted.
+
+.Insert and query example using postgresql json fields.
+[source, clojure]
+----
+;; Create table
+(sc/execute ctx "create table t1 (k json)")
+
+;; Insert a json value
+(sc/execute ctx ["insert into t1 (k) values (?)" {:foo 1}])
+
+;; Query a table with json value
+(sc/fetch ctx ["select * from t1"])
+;; => [{:k {:foo 1}}]
+----
+
+
+== SQL Building and Formatting
+
+This section intends to explain the usage of sql building library, the lightweight
+layer on top of `jooq` dsl.
+
+You can found all related functions of sql dsl on `suricatta.dsl` namespace:
+
+[source, clojure]
+----
+(require '[suricatta.dsl :as dsl])
+----
+
+And functions related to formating sql into string or sqlvec format in
+`suricatta.format` namespace:
+
+[source, clojure]
+----
+(require '[suricatta.format :as fmt])
+----
+
+
+Object instances retured by dsl api are fully compatible with the sql executing
+api. Let see an example:
+
+[source, clojure]
+----
+(def my-query
+  (-> (dsl/select :id)
+      (dsl/from :books)
+      (dsl/where ["age > ?", 100])
+      (dsl/limit 1)))
+
+(with-open [ctx (sc/context dbspec)]
+  (sc/fetch ctx my-query))
+;; => [{:id 4232}]
+----
+
+
+=== The SELECT statement
+
+==== Select clause
+
+Simple select clause without from part:
+
+[source, clojure]
+----
+(dsl/select :id :name)
+----
+
+Would generate SQL like this:
+
+[source,sql]
+----
+select id, name from dual
+----
+
+The rendering result depends on the dialect used. You can specify a different
+dialect by passing the `:dialect` option to the `sql` function of
+`suricatta.format` namespace:
+
+[source, clojure]
+----
+(-> (dsl/select :id :name)
+    (fmt/sql {:dialect :postgresql}))
+;; => "select id, name"
+----
+
+
+==== Select DISTINCT
+
+You can add the distinct keyword by using a special select function:
+
+[source, clojure]
+----
+(-> (dsl/select-distinct :name)
+    (fmt/sql))
+;; => "select distinct name"
+----
+
+
+==== Select *
+
+You can ommit fields on `select` function to use the "SELECT *" sql form:
+
+[source, clojure]
+----
+(-> (dsl/select)
+    (dsl/from :book)
+    (fmt/sql))
+;; => "select * from book"
+----
+
+
+==== Select with function
+
+In select clauses you can put any kind of expresions such as sql functions:
+
+[source, clojure]
+----
+(-> (dsl/select '("length(book.title)" "title_length"))
+    (dsl/from :book)
+    (fmt/sql))
+;; => "select length(book.title) \"title_length\" from book"
+----
+
+
+==== The FROM clause
+
+A simple sql "select ... from" clause:
+
+[source, clojure]
+----
+(-> (dsl/select :book.id :book.name)
+    (dsl/from :book)
+    (fmt/sql))
+;; => "select book.id, book.name from book"
+----
+
+Also, the sql from clause supports any number of tables:
+
+[source, clojure]
+----
+(-> (dsl/select-one)
+    (dsl/from :book :article)
+    (fmt/sql))
+;; => "select 1 from book, article"
+----
+
+Also, you can specify an alias for each table:
+
+[source, clojure]
+----
+(-> (dsl/select-one)
+    (dsl/from '("book" "b")
+              '("article" "a"))
+    (fmt/sql))
+;; => "select 1 from book \"a\", article \"b\""
+----
+
+
+==== The JOIN clause
+
+_suricata_ comes with a complete dsl for making join clauses. Let see one
+simple example:
+
+[source, clojure]
+----
+(-> (dsl/select :name)
+    (dsl/from :book)
+    (dsl/join :author)
+    (dsl/on "book.author_id = book.id")
+    (fmt/sql))
+;; => "select name from book join author on (book.author_id = book.id)"
+----
+
+You can use table aliases with join clauses:
+
+[source, clojure]
+----
+(-> (dsl/select :name)
+    (dsl/from '("book" "b"))
+    (dsl/join '("author" "a"))
+    (dsl/on "b.author_id = a.id")
+    (fmt/sql))
+;; => "select name from book \"b\" join author \"a\" on (b.author_id = a.id)"
+----
+
+Also, join clause can be applied to table expressions:
+
+[source, clojure]
+----
+(-> (dsl/select :name)
+    (dsl/from (-> (dsl/table "book")
+                  (dsl/join "author")
+                  (dsl/on "book.author_id = book.id")))
+    (fmt/sql))
+;; => "select name from book join author on (book.author_id = book.id)"
+----
+
+
+==== The WHERE clause
+
+The WHERE clause can be used to JOIN or filter predicates in order to restrict
+the data returned by the query:
+
+[source, clojure]
+----
+(-> (dsl/select :name)
+    (dsl/from :book)
+    (dsl/where "book.age > 100")
+    (fmt/sql))
+;; => "select name from book where (book.age > 100)"
+----
+
+Building a where clause with multiple conditions:
+
+[source, clojure]
+----
+(-> (dsl/select :name)
+    (dsl/from :book)
+    (dsl/where "book.age > 100"
+               "book.in_store = true")
+    (fmt/sql))
+;; => "select name from book where ((book.age > 100) and (book.in_store = true))"
+----
+
+
+Bind parameters instead of inlining them on conditions:
+
+[source, clojure]
+----
+(-> (dsl/select :name)
+    (dsl/from :book)
+    (dsl/where ["book.age > ?" 100]
+               ["book.in_store = ?", true])
+    (fmt/sqlvec))
+;; => ["select name from book where ((book.age > ?) and (book.in_store = ?))" 100 true]
+----
+
+Using explicit logical operators:
+
+[source, clojure]
+----
+(-> (dsl/select :name)
+    (dsl/from :book)
+    (dsl/where (dsl/or "book.age > 20"
+                       (dsl/not "book.in_store")))
+    (fmt/sql))
+;; => "select name from book where ((book.age > 20) or (not book.in_store))"
+----
+
+Different kind of joins are suported with that functions: `dsl/full-outer-join`,
+`dsl/left-outer-join`, `dsl/right-outer-join` and `dsl/cross-join`.
+
+
+==== The GROUP BY clause
+
+GROUP BY can be used to create unique groups of data, to form aggregations, to
+remove duplicates and for other reasons. Let see an example of how it can be
+done using the _suricatta_ dsl:
+
+[source, clojure]
+----
+(-> (dsl/select (dsl/field "name")
+                (dsl/field "count(*)"))
+    (dsl/from :book)
+    (dsl/group-by :name)
+    (fmt/sql))
+;; => "select name, count(*) from book group by name"
+----
+
+
+==== The HAVING clause
+
+The HAVING clause is used to further restrict aggregated data. Let see an example:
+
+[source, clojure]
+----
+(-> (dsl/select (dsl/field "name")
+                (dsl/field "count(*)"))
+    (dsl/from :book)
+    (dsl/group-by :name)
+    (dsl/having ["count(*) > ?", 2])
+    (fmt/sql))
+;; => "select name, count(*) from book group by name having (count(*) > ?)"
+----
+
+==== The ORDER BY clause
+
+Here's an example of how specify the ordering to the query:
+
+.Ordering by field with implicit sort direction
+[source, clojure]
+----
+(-> (dsl/select :name)
+    (dsl/from :book)
+    (dsl/order-by :name)
+    (fmt/sql))
+;; => "select name from book order by name asc"
+----
+
+In previous example we specified the order field without order direction.
+_surricata_ automatically uses `ASC` for sort fields that comes without explicit
+ordering direction.
+
+.Specify sort direction explicitly
+[source, clojure]
+----
+(-> (dsl/select :name)
+    (dsl/from :book)
+    (dsl/order-by [:name :desc])
+    (fmt/sql))
+;; => "select name from book order by name desc"
+----
+
+.Handling nulls
+[source, clojure]
+----
+(-> (dsl/select :name)
+    (dsl/from :book)
+    (dsl/order-by [:name :desc :nulls-last])
+    (fmt/sql))
+;; => "select name from book order by name desc nulls last"
+----
+
+.Ordering by index
+[source, clojure]
+----
+(-> (dsl/select :id :name)
+    (dsl/from :book)
+    (dsl/order-by ["1" :asc]
+                  ["2" :desc])
+    (fmt/sql))
+;; => "select name from book order by 1 asc, 2 desc"
+----
+
+
+==== The LIMIT and OFFSET clauses
+
+Let see some examples of how to apply `limit` and `offset` to your queries
+with _suricatta_:
+
+[source, clojure]
+----
+(-> (dsl/select :id :name)
+    (dsl/from :book)
+    (dsl/limit 10)
+    (dsl/offset 100)
+    (fmt/sql))
+;; => "select name from book limit ? offset ?"
+----
+
+
+==== The FOR UPDATE clause
+
+For inter-process synchronisation and other reasons, you may choose to use the
+`SELECT .. FOR UPDATE` clause to indicate to the database, that a set of cells
+or records should be locked by a given transaction for subsequent updates. Let
+see an example of how use it with _suricatta_ dsl:
+
+.Without specific fields
+[source, clojure]
+----
+(-> (dsl/select)
+    (dsl/from :book)
+    (dsl/for-update)
+    (fmt/sql))
+;; => "select * from book for update"
+----
+
+.With specific fields
+[source, clojure]
+----
+(-> (dsl/select)
+    (dsl/from :book)
+    (dsl/for-update :name)
+    (fmt/sql))
+;; => "select * from book for update of \"name\""
+----
+
+
+==== The UNION and UNION ALL clause
+
+These operators combine two results into one. UNION removes all duplicate
+records resulting from this combination and UNION ALL preserves all results as
+they are.
+
+.Using UNION clause
+[source, clojure]
+----
+(-> (dsl/union
+    (-> (dsl/select :name)
+        (dsl/from :books))
+    (-> (dsl/select :name)
+        (dsl/from :articles)))
+    (fmt/sql))
+;; => "(select name from books) union (select name from articles)"
+----
+
+.Using UNION ALL clause
+[source, clojure]
+----
+(-> (dsl/union-all
+    (-> (dsl/select :name)
+        (dsl/from :books))
+    (-> (dsl/select :name)
+        (dsl/from :articles)))
+    (fmt/sql))
+;; => "(select name from books) union all (select name from articles)"
+----
+
+
+=== The INSERT statement
+
+The INSERT statement is used to insert new records into a database table.
+
+.Example of insert two rows in one table.
+[source, clojure]
+----
+(-> (dsl/insert-into :table1)
+    (dsl/insert-values {:f1 1 :f2 2 :f3 3})
+    (dsl/insert-values {:f1 4 :f2 5 :f3 6})
+    (fmt/sqlvec))
+;; => ["insert into t1 (f1, f2, f3) values (?, ?, ?), (?, ?, ?)" 1 2 3 4 5 6]
+----
+
+
+=== The UPDATE statement
+
+The UPDATE statement is used to modify one or several pre-existing records in 
+a database table.
+
+.Example of update statement without condition.
+[source, clojure]
+----
+(-> (dsl/update :t1)
+    (dsl/set :name "foo")
+    (fmt/sql))
+;; => "update t1 set name = ?"
+----
+
+.Example of update statement without condition using a map
+[source, clojure]
+----
+(-> (dsl/update :t1)
+    (dsl/set {:name "foo" :bar "baz"})
+    (fmt/sql))
+;; => "update t1 set name = ?, bar = ?"
+----
+
+.Example of update statement with one condition.
+[source, clojure]
+----
+(-> (dsl/update :t1)
+    (dsl/set :name "foo")
+    (dsl/where ["id = ?" 1])
+    (fmt/sql))
+;; => "update t1 set name = ? where (id = ?)"
+----
+
+.Example of update statement using subquery.
+[source, clojure]
+----
+(-> (dsl/update :t1)
+    (dsl/set :f1 (-> (dsl/select :f2)
+                     (dsl/from :t2)
+                     (dsl/where ["id = ?" 2])))
+    (fmt/sql {:dialect :pgsql}))
+;; => "update t1 set f1 = (select f2 from t2 where (id = ?))"
+----
+
+.Example of multiple assignation un update statement using subquery.
+[source, clojure]
+----
+(-> (dsl/update :t1)
+    (dsl/set (dsl/row (dsl/field :f1)
+                      (dsl/field :f2))
+             (-> (dsl/select :f3 :f4)
+                 (dsl/from :t2)
+                 (dsl/where ["id = ?" 2])))
+    (fmt/sql {:dialect :pgsql}))
+;; => "update t1 set (f1, f2) = (select f3, f4 from t2 where (id = ?))"
+----
+
+.Example of returning clause used in UPDATE statement.
+[source, clojure]
+----
+(-> (dsl/update :t1)
+    (dsl/set :name "foo")
+    (dsl/returning :id)
+    (fmt/sql {:dialect :pgsql}))
+;; => "update t1 set name = ? returning id"
+----
+
+.Example using function as value.
+[source, clojure]
+----
+(-> (dsl/update :t1)
+    (dsl/set :name (dsl/f ["concat(name, ?)" "-foo"]))
+    (dsl/set :name_length (dsl/f "length(name)"))
+    (dsl/returning :id)
+    (fmt/sql {:dialect :pgsql}))
+;; => "update t1 set name = ? returning id"
+----
+
+
+=== The DELETE statement
+
+.Simple example of delete statement with one condition
+[source, clojure]
+----
+(-> (dsl/delete :t1)
+    (dsl/where "id = 1")
+    (fmt/sql))
+;; => "delete from t1 where (id = 1)"
+----
+
+
+=== The DDL statements
+
+
+==== The TRUNCATE statement
+
+[source, clojure]
+----
+(-> (dsl/truncate :table1)
+    (fmt/sql))
+;; => "truncate table table1"
+----
+
+
+==== The CREATE TABLE statement
+
+[source, clojure]
+(-> (dsl/create-table :t1)
+    (dsl/add-column :title {:type :pg/varchar :length 100 :null false})
+    (fmt/sql))
+;; => "create table t1 (title varchar(100) not null)"
+
+NOTE: at this moment, the add-column function doest not permit the way to setup
+default value for a field in table creation statement.
+
+
+==== The DROP TABLE statement
+
+.Drop table example
+[source, clojure]
+----
+(-> (dsl/drop-table :t1)
+    (fmt/sql))
+;; => "drop table t1"
+----
+
+
+==== The ALTER TABLE statement
+
+Alter statements are used mainly to add, modify or delete columns from table.
+
+.Add new column
+[source, clojure]
+----
+(-> (dsl/alter-table :t1)
+    (dsl/add-column :title {:type :pg/varchar :length 2 :null false})
+    (fmt/sql))
+;; => "alter table t1 add title varchar(2) not null"
+----
+
+.Change type of column
+[source, clojure]
+----
+(-> (dsl/alter-table :t1)
+    (dsl/alter-column :title {:type :pg/varchar :length 100 :null false})
+    (fmt/sql))
+;; => "alter table t1 alter title varchar(100) not null"
+----
+
+.Drop column
+[source, clojure]
+----
+(-> (dsl/alter-table :t1)
+    (dsl/drop-column :title :cascade)
+    (fmt/sql))
+;; => "alter table t1 drop title cascade"
+----
+
+
+[[create-index]]
+==== The CREATE INDEX statement
+
+.Create simple on field
+[source, clojure]
+----
+(-> (dsl/create-index "test")
+    (dsl/on :t1 :title)
+    (fmt/sql))
+;; => "create index \"test\" on t1(title)"
+----
+
+.Create index on field expression
+[source, clojure]
+----
+(-> (dsl/create-index "test")
+    (dsl/on :t1 (dsl/field "lower(title)"))
+    (fmt/sql))
+;; => "create index \"test\" on t1(lower(title))"
+----
+
+
+[[drop-index]]
+==== The DROP INDEX statement
+
+.Drop index
+[source, clojure]
+----
+(-> (dsl/drop-index "test")
+    (fmt/sql))
+;; => "drop index \"test\""
+----
+
+
+==== The CREATE SEQUENCE statement
+
+[source, clojure]
+----
+(-> (dsl/create-sequence "testseq")
+    (fmt/sql))
+;; => "create sequence \"testseq\""
+----
+
+
+==== The ALTER SEQUENCE statement
+
+.Restart sequence
+[source, clojure]
+----
+(-> (dsl/alter-sequence "testseq" true)
+    (fmt/sql))
+;; => "alter sequence \"testseq\" restart"
+----
+
+.Restart sequence with concrete number
+[source, clojure]
+----
+(-> (dsl/alter-sequence "testseq" 19)
+    (fmt/sql))
+;; => "alter sequence \"testseq\" restart with 19"
+----
+
+
+==== The DROP SEQUENCE statement
+
+.Drop sequence
+[source, clojure]
+----
+(-> (dsl/drop-sequence "testseq")
+    (fmt/sql))
+;; => "drop sequence \"testseq\""
+----
+
+.Drop sequence if exists
+[source, clojure]
+----
+(-> (dsl/drop-sequence "testseq" true)
+    (fmt/sql))
+;; => "drop sequence if exists \"testseq\""
+----
+
+
+=== Table Expressions
+
+==== The VALUES() table constructor
+
+Some databases allow expressing in-memory temporary tables using a `values()` syntax.
+
+.Select from `values()` example
+[source, clojure]
+----
+(-> (dsl/select :f1 :f2)
+    (dsl/from (-> (dsl/values (dsl/row 1 2)
+                              (dsl/row 3 4))
+                  (dsl/as-table "t1" "f1" "f2")))
+    (fmt/sql {:type :inlined}))
+;; => "select f1, f2 from (values(1, 2), (3, 4)) as \"t1\" (\"f1\", \"f2\")"
+----
+
+WARNING: `suricatta.dsl/row` is defined as a macro and only accepts literals.
+
+
+==== Nested SELECTs
+
+.Using nested select in where clause
+[source, clojure]
+----
+(-> (dsl/select)
+    (dsl/from :book)
+    (dsl/where (list "book.age = ({0})" (dsl/select-one)))
+    (fmt/sql))
+
+;; => "select * from book where (book.age = (select 1 as \"one\"))"
+----
+
+.Using nested select in from clause
+[source, clojure]
+----
+(-> (dsl/select)
+    (dsl/from (-> (dsl/select :f1)
+                  (dsl/from :t1)
+                  (dsl/as-table "tt1")))
+    (fmt/sql))
+;; => "select \"tt1\".\"f1\" from (select f1 from t1) as \"tt1\"(\"f1\")"
+----
+
+.Using nested select in select fields clauses
+[source, clojure]
+----
+(-> (dsl/select :fullname, (-> (dsl/select (dsl/field "count(*)"))
+                               (dsl/from :book)
+                               (dsl/where "book.authorid = author.id")
+                               (dsl/as-field "books")))
+    (dsl/from :author)
+    (fmt/sql))
+;; => "select fullname, (select count(*) from book where (book.authorid = author.id)) "books" from author"
+----
+
+
+== FAQ
+
+=== Why I should use suricatta instead of clojure.jdbc or java.jdbc?
+
+Unlike any jdbc library, _suricatta_ works at a slightly higher level. It hides a
+lot of idiosyncrasies of jdbc under a much *simpler, cleaner and less error prone
+api*, with better resource management.
+
+
+=== Where is the async support?
+
+In previous version _suricatta_ it had come with asynchronous support using
+core.async channels as response but since the version 0.4.0 it is removed because
+core.async is not a proper abstraction for represent a promise.
+
+In the jvm world, the proper promise abstraction is introduced in JDK8 so using
+that abstraction will force people use JDK8, something that I don't want to do at
+this moment.
+
+The great news is that async support is stil very easy implement, so you can do
+it in your own code base defining two additional functions. Here a code snippet
+for it:
+
+[source, clojure]
+----
+(require '[suricatta.core :as sc]
+         '[cats.monad.exception :as exc]
+         '[promissum.core :as p])
+
+(defn execute
+  "Execute a query asynchronously returning a CompletableFuture."
+  ([ctx q]
+   (execute ctx q {}))
+  ([ctx q opts]
+   (let [act (.-act ctx)
+         fun #(% (exc/try-on (sc/execute ctx q)))]
+     (p/promise
+      (fn [deliver]
+        (send-off act (fn [_] (fun deliver))))))))
+
+(defn fetch
+  "Execute a query asynchronously returning a CompletableFuture."
+  ([ctx q]
+   (fetch ctx q {}))
+  ([ctx q opts]
+   (let [act (.-act ctx)
+         fun #(% (exc/try-on (sc/fetch ctx q opts)))]
+     (p/promise
+      (fn [deliver]
+        (send-off act (fn [_] (fun deliver))))))))
+----
+
+
+=== Why another dsl? Is it just yet another dsl?
+
+First _suricatta_ is not a dsl library, it's a sql toolkit, and one part of the
+toolkit is a dsl.
+
+Secondly, _suricatta_'s dsl's don't intends to be a sql abstraction. The real
+purpose of _suricatta_'s dsl is make SQL composable while still allowing use all or
+almost all vendor specific sql constructions.
+
+=== What are some suricatta use cases?
+
+The _suricatta_ library is very flexible and it can be used in very different ways:
+
+- You can build queries with _suricatta_ and execute them with _clojure.jdbc_.
+- You can use _suricatta_ for executing queries with string-based sql.
+- You can combine the _suricatta_ library with _clojure.jdbc_.
+- And obviously, you can forget jdbc and use _suricatta_ for both purposes, building
+  and/or executing queries.
+
+
+=== Is it a korma-clone?
+
+Nope, it's not korma clone, because it works very different, and it has a different
+philosophy.
+
+_suricatta_ has cleaner differentiation between dsl and query execution/fetching.
+It doesn't intend to be a replacement of Korma, it intends be a replacement to raw
+jdbc access to the database.
+
+
+=== Is a JOOQ comercial license requried?
+
+Not, _suricatta_ works and is tested with the opensource (Apache 2.0 licensed)
+version of JOOQ.
+
+I have plans to make _suricatta_ work with enterprise version of JOOQ for users
+that want to use "enterprise" databases in the future. In any case, that will not
+affect the open source version.
+
+
+=== Can I store safely queries builded by DSL in a var, they are immutable?
+
+Yes. Unlike JOOQ DSL interface which has a mutable api, _suricatta_ exposes an
+immutable api for building queries.
+
+Queries built with _suricatta_ can be safely shared through different threads.
+
+
+== Developers Guide
+
+=== Philosophy
+
+The five most important rules are:
+
+- Beautiful is better than ugly.
+- Explicit is better than implicit.
+- Simple is better than complex.
+- Complex is better than complicated.
+- Readability counts.
+
+All contributions to _suricatta_ should keep these important rules in mind.
+
+
+=== Contributing
+
+Unlike Clojure and other Clojure contributed libraries _suricatta_ does not have many
+restrictions for contributions. Just open an issue or pull request.
+
+
+=== Source Code
+
+_suricatta_ is open source and can be found on
+link:https://github.com/funcool/suricatta[github].
+
+You can clone the public repository with this command:
+
+[source,text]
+----
+git clone https://github.com/funcool/suricatta
+----
+
+
+=== Run tests
+
+[source, text]
+----
+lein test
+----
+
+=== License
+
+_suricatta_ is licensed under BSD (2-Clause) license:
+
+----
+Copyright (c) 2014-2015 Andrey Antukh <niwi@niwi.nz>
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+----

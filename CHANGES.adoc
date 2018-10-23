@@ -1,0 +1,198 @@
+= Changelog
+
+== 1.3.1
+
+Date: 2016-12-25
+
+- Fix compatibility issues with jOOQ 3.9.0
+
+
+== 1.3.0
+
+Date: 2016-12-25
+
+- Update to jOOQ 3.8.6.
+- Fix unexpected exception when core and dsl is imported without importing format.
+
+
+== 1.2.0
+
+Date: 2016-11-15
+
+- Add `dsl/exists` and `dsl/not-exists` subquery clauses.
+- Add `suricatta.dsl.pgsql` namespace for PostgreSQL specific dsl extensions.
+- Update to jOOQ 3.8.6.
+
+
+== 1.1.0
+
+Date: 2016-05-28
+
+- Rename `atomic-apply` to `apply-atomic`.
+- Keep backward compatible alias for previous change.
+- Update to jOOQ 3.8.2
+
+
+== 1.0.0
+
+Date: 2016-05-26
+
+- Update jOOQ to 3.8.1
+- BREAKING CHANGE: change internal protocol function names. This change will
+  affect only who use them for exented suricatta behavior.
+- Format functions renamed to more simpler names (backward compatible aliases
+  are maintained).
+- Remove internal (not documented) agent from context instances.
+
+
+== 0.9.0
+
+Date: 2016-03-20
+
+- Update clojure to 1.8.0
+- Update jOOQ to 3.7.3
+
+
+== 0.8.1
+
+Date: 2016-02-08
+
+- Add additional parameters to sqlvec enablig the option to specify the dialect.
+- Add the ability to use insert statements in fetch operations.
+
+
+== 0.8.0
+
+Date: 2016-01-16
+
+Breaking changes:
+
+- The approach introduced in previous version for create
+  aliases is a little bit changed. Now uses lists instead vector for avoid
+  confusion with the widelly used vector for pass params.
+- Removed `as-table` function (replaced with `to-table` with specific
+  implementation for common table expresions).
+- The functions `field` and `table` now receives alias as optional argument
+  instead of map of options.
+
+
+Other changes:
+
+- Add `f` function as shortcut for declare functions. Previously `field` is used
+  (and can continue to be used). Is just a shortcut.
+- Set function improved.
+
+
+== 0.7.0
+
+Date: 2016-01-15
+
+- Fix unexpected behavior of join dsl method.
+- Improved way to set aliases to fields and tables.
+- Minor internal improvements related to dsl internals.
+
+
+== 0.6.2
+
+Date: 2016-01-06
+
+- Update jOOQ to 3.7.2
+
+
+== 0.6.1
+
+Date: 2015-11-16
+
+- Update jOOQ to 3.7.1
+
+
+== 0.6.0
+
+Date: 2015-10-26
+
+- Add support for the missing :pg/json type.
+- Add the ability to use types defined by arbitrary string.
+- BREAKING CHANGE: The extension mechanism for third party types
+  has ben rewritten.
+
+
+== 0.5.0
+
+Date: 2015-10-17
+
+- Remove cats dependency.
+- Remove clojure.jdbc dependency.
+
+
+== 0.4.0
+
+Date: 2015-10-12
+
+- Update cats dependency to the last version (1.0.0)
+- Update clojure default version to 1.7.0
+- Update clojure.jdbc version to the last version (0.6.1)
+- BREAKING CHANGE: Update jOOQ version to 3.7.0 that
+  now requires jdk8.
+- BREAKING CHANGE: all protocols functions are renamed to
+  the `-functionname` naming style.
+- BREAKING CHANGE: async interface is removed.
+  More detailed explication is found on faq section of
+  the documentation.
+
+
+== 0.3.0
+
+Date: 2015-04-28
+
+- Update to the next major release of cats that simplifies usage of return values
+  of async api.
+- Update to the next major release of clojure.jdbc that introduces some improvements
+  and bugfixes on connection management.
+- Update to the next major release of jooq, that also introduces improvements an a
+  lot of bug fixes.
+
+
+== 0.2.2
+
+Date: 2015-03-02
+
+- Update jooq to 3.5.3
+- Add fetch-one function (thanks to @jespino)
+
+
+== 0.2.1
+
+Date: 2015-02-22
+
+- Update JOOQ to 3.5.2
+- Update clojure.jdbc to 0.4.0
+- Update cats to 0.3.2
+
+
+== 0.2.0
+
+Date: 2015-01-17
+
+- Add support for CREATE/ALTER/DROP INDEX on dsl.
+- Add support for CREATE/ALTER/DROP SEQUENCE on dsl.
+- Add support for FULL/LEFT/RIGHT OUTER JOIN on dsl.
+- Add support for CREATE TABLE on dsl.
+- Fix inconsistencies when connection is created from datasource.
+- Add suport for csv and json as export format.
+- Delegate connection creation to clojure.jdbc.
+- Add support for extending self with custom types.
+
+Backward incompatible changes:
+
+- Fetch options are changed. It is mainly affects if you are using the rows parameter.
+  In that case change `{:rows true}` with `{:format :row}`
+- Change dsl/table and dsl/field api: remove named parameters in favor to options map.
+- suricatta.async/fetch changed returned value.
+- suricatta.core/cursor->lazyseq opts are changed. See the first point.
+
+
+== 0.1.0-alpha
+
+Date: 2014-11-06
+
+- Initial version.
